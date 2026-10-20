@@ -52,9 +52,9 @@ type PromptCompletedResult struct {
 
 // SecretService
 type SecretService struct {
-	conn               *dbus.Conn
-	signalCh           <-chan *dbus.Signal
-	sessionOpenTimeout time.Duration
+	conn        *dbus.Conn
+	signalCh    <-chan *dbus.Signal
+	callTimeout time.Duration
 }
 
 // Session
@@ -66,8 +66,8 @@ type Session struct {
 	AESKey  []byte
 }
 
-// DefaultSessionOpenTimeout
-const DefaultSessionOpenTimeout = 10 * time.Second
+// DefaultCallTimeout
+const DefaultCallTimeout = 10 * time.Second
 
 // ErrNoSessionBus is returned by [NewService] when no D-Bus session bus can be
 // reached: either DBUS_SESSION_BUS_ADDRESS names a unix socket that does not
@@ -119,7 +119,7 @@ func NewService(ctx context.Context) (*SecretService, error) {
 		_ = conn.Close()
 		return nil, fmt.Errorf("failed to subscribe to prompt completion signals: %w", err)
 	}
-	return &SecretService{conn: conn, signalCh: signalCh, sessionOpenTimeout: DefaultSessionOpenTimeout}, nil
+	return &SecretService{conn: conn, signalCh: signalCh, callTimeout: DefaultCallTimeout}, nil
 }
 
 // sessionBusMissingSocket reports whether DBUS_SESSION_BUS_ADDRESS names one or
@@ -237,9 +237,9 @@ func (s *SecretService) Available(ctx context.Context) error {
 	return nil
 }
 
-// SetSessionOpenTimeout
-func (s *SecretService) SetSessionOpenTimeout(d time.Duration) {
-	s.sessionOpenTimeout = d
+// SetCallTimeout
+func (s *SecretService) SetCallTimeout(d time.Duration) {
+	s.callTimeout = d
 }
 
 // ServiceObj
@@ -256,15 +256,28 @@ func (s *SecretService) Obj(path dbus.ObjectPath) dbus.BusObject {
 //
 // https://specifications.freedesktop.org/secret-service-spec/latest/index.html
 const (
-	collectionsProperty  = "org.freedesktop.Secret.Service.Collections"
-	readAliasMethod      = "org.freedesktop.Secret.Service.ReadAlias"
-	collectionLockedProp = "org.freedesktop.Secret.Collection.Locked"
+	secretServiceInterfaceName    = "org.freedesktop.Secret.Service"
+	secretCollectionInterfaceName = "org.freedesktop.Secret.Collection"
+	collectionsProperty           = "Collections"
+	collectionLockedProp          = "Locked"
+	readAliasMethod               = "org.freedesktop.Secret.Service.ReadAlias"
+	propertiesGetMethod           = "org.freedesktop.DBus.Properties.Get"
 )
 
+func (s *SecretService) getProperty(ctx context.Context, obj dbus.BusObject, interfaceName, property string) (dbus.Variant, error) {
+	callCtx, cancel := context.WithTimeout(ctx, s.callTimeout)
+	defer cancel()
+	var variant dbus.Variant
+	if err := obj.CallWithContext(callCtx, propertiesGetMethod, NilFlags, interfaceName, property).Store(&variant); err != nil {
+		return dbus.Variant{}, err
+	}
+	return variant, nil
+}
+
 // Collections returns the object paths of every collection known to the secret
-// service.
-func (s *SecretService) Collections() ([]dbus.ObjectPath, error) {
-	variant, err := s.ServiceObj().GetProperty(collectionsProperty)
+// service. ctx bounds the round-trip, capped by the service's call timeout.
+func (s *SecretService) Collections(ctx context.Context) ([]dbus.ObjectPath, error) {
+	variant, err := s.getProperty(ctx, s.ServiceObj(), secretServiceInterfaceName, collectionsProperty)
 	if err != nil {
 		return nil, err
 	}
@@ -277,18 +290,22 @@ func (s *SecretService) Collections() ([]dbus.ObjectPath, error) {
 
 // ReadAlias resolves an alias (e.g. "default") to the collection object path it
 // points at. The secret service returns the null path "/" when the alias is not
-// assigned to any collection.
-func (s *SecretService) ReadAlias(alias string) (dbus.ObjectPath, error) {
+// assigned to any collection. ctx bounds the round-trip, capped by the
+// service's call timeout.
+func (s *SecretService) ReadAlias(ctx context.Context, alias string) (dbus.ObjectPath, error) {
+	callCtx, cancel := context.WithTimeout(ctx, s.callTimeout)
+	defer cancel()
 	var path dbus.ObjectPath
-	if err := s.ServiceObj().Call(readAliasMethod, NilFlags, alias).Store(&path); err != nil {
+	if err := s.ServiceObj().CallWithContext(callCtx, readAliasMethod, NilFlags, alias).Store(&path); err != nil {
 		return "", err
 	}
 	return path, nil
 }
 
-// IsLocked reports whether the given collection is currently locked.
-func (s *SecretService) IsLocked(collection dbus.ObjectPath) (bool, error) {
-	variant, err := s.Obj(collection).GetProperty(collectionLockedProp)
+// IsLocked reports whether the given collection is currently locked. ctx bounds
+// the round-trip, capped by the service's call timeout.
+func (s *SecretService) IsLocked(ctx context.Context, collection dbus.ObjectPath) (bool, error) {
+	variant, err := s.getProperty(ctx, s.Obj(collection), secretCollectionInterfaceName, collectionLockedProp)
 	if err != nil {
 		return false, err
 	}
@@ -318,14 +335,14 @@ func (s *SecretService) OpenSession(ctx context.Context, mode AuthenticationMode
 		return nil, fmt.Errorf("unknown authentication mode %v", mode)
 	}
 
-	callCtx, cancel := context.WithTimeout(ctx, s.sessionOpenTimeout)
+	callCtx, cancel := context.WithTimeout(ctx, s.callTimeout)
 	defer cancel()
 	var sessionAlgorithmOutput dbus.Variant
 	if err := s.ServiceObj().
 		CallWithContext(callCtx, "org.freedesktop.Secret.Service.OpenSession", NilFlags, mode, sessionAlgorithmInput).
 		Store(&sessionAlgorithmOutput, &session.Path); err != nil {
 		if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
-			return nil, fmt.Errorf("failed to open secretservice session: timed out after %s: %w", s.sessionOpenTimeout, err)
+			return nil, fmt.Errorf("failed to open secretservice session: timed out after %s: %w", s.callTimeout, err)
 		}
 		return nil, fmt.Errorf("failed to open secretservice session: %w", err)
 	}

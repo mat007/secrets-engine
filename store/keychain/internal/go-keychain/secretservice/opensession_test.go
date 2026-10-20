@@ -185,8 +185,8 @@ func newDelayedSessionService(t *testing.T) (*SecretService, *delayedSessionServ
 	}
 	require.NoError(t, conn.Export(backend, SecretServiceObjectPath, "org.freedesktop.Secret.Service"))
 	svc := &SecretService{
-		conn:               client,
-		sessionOpenTimeout: 250 * time.Millisecond,
+		conn:        client,
+		callTimeout: 250 * time.Millisecond,
 	}
 	return svc, backend
 }
@@ -219,7 +219,7 @@ func openSessionAsync(ctx context.Context, svc *SecretService) <-chan openResult
 
 func TestOpenSessionNegotiatesDHAES(t *testing.T) {
 	svc, backend := newDelayedSessionService(t)
-	svc.SetSessionOpenTimeout(5 * time.Second)
+	svc.SetCallTimeout(5 * time.Second)
 
 	result := openSessionAsync(t.Context(), svc)
 	request := receiveSessionValue(t, backend.requests)
@@ -257,7 +257,7 @@ func TestOpenSessionTimeout(t *testing.T) {
 
 			late.reply <- test.reply
 
-			svc.SetSessionOpenTimeout(5 * time.Second)
+			svc.SetCallTimeout(5 * time.Second)
 			result = openSessionAsync(t.Context(), svc)
 			next := receiveSessionValue(t, backend.requests)
 			next.reply <- nil
@@ -286,7 +286,7 @@ func TestOpenSessionTimeoutThenCloseDisconnects(t *testing.T) {
 
 func TestOpenSessionCallerCancel(t *testing.T) {
 	svc, backend := newDelayedSessionService(t)
-	svc.SetSessionOpenTimeout(5 * time.Second)
+	svc.SetCallTimeout(5 * time.Second)
 
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -304,7 +304,7 @@ func TestOpenSessionCancelledContext(t *testing.T) {
 	for _, mode := range []AuthenticationMode{AuthenticationInsecurePlain, AuthenticationDHAES} {
 		t.Run(string(mode), func(t *testing.T) {
 			svc, backend := newDelayedSessionService(t)
-			svc.SetSessionOpenTimeout(5 * time.Second)
+			svc.SetCallTimeout(5 * time.Second)
 
 			ctx, cancel := context.WithCancel(t.Context())
 			cancel()
